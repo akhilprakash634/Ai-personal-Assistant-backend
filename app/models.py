@@ -22,6 +22,7 @@ class NotificationPlatform(str, enum.Enum):
     TEAMS = "teams"
     WHATSAPP = "whatsapp"
     SMS = "sms"
+    TELEGRAM = "telegram"
 
 class User(Base):
     __tablename__ = "users"
@@ -36,6 +37,9 @@ class User(Base):
     slack_webhook = Column(String, nullable=True)
     teams_webhook = Column(String, nullable=True)
     whatsapp_number = Column(String, nullable=True)
+    telegram_chat_id = Column(String, nullable=True)
+    slack_user_id = Column(String, nullable=True)
+    teams_user_id = Column(String, nullable=True)
     
     # New Preferences
     timezone = Column(String, default="UTC")
@@ -45,6 +49,9 @@ class User(Base):
     tasks = relationship("Task", back_populates="owner", cascade="all, delete-orphan")
     reminders = relationship("Reminder", back_populates="owner", cascade="all, delete-orphan")
     activities = relationship("ActivityLog", back_populates="user", cascade="all, delete-orphan")
+    expenses = relationship("Expense", back_populates="owner", cascade="all, delete-orphan")
+    subscriptions = relationship("Subscription", back_populates="owner", cascade="all, delete-orphan")
+    notifications = relationship("Notification", back_populates="owner", cascade="all, delete-orphan")
 
 class Task(Base):
     __tablename__ = "tasks"
@@ -92,3 +99,37 @@ class ActivityLog(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
     
     user = relationship("User", back_populates="activities")
+
+class Expense(Base):
+    __tablename__ = "expenses"
+    id = Column(Integer, primary_key=True, index=True)
+    amount = Column(Integer, nullable=False) # Store in cents/paise
+    category = Column(String, default="Misc")
+    date = Column(DateTime, default=datetime.utcnow)
+    note = Column(String, nullable=True)
+    
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    owner = relationship("User", back_populates="expenses")
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    renewal_date = Column(DateTime, nullable=False)
+    recurrence = Column(Enum(RecurrenceType), default=RecurrenceType.MONTHLY)
+    cost = Column(Integer, nullable=True)
+    
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    owner = relationship("User", back_populates="subscriptions")
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    message = Column(String, nullable=False)
+    type = Column(String, default="info") # e.g. "reminder", "overdue", "alert"
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    owner = relationship("User", back_populates="notifications")

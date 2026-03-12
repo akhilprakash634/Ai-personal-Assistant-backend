@@ -9,6 +9,9 @@ class UserBase(BaseModel):
     slack_webhook: Optional[str] = None
     teams_webhook: Optional[str] = None
     whatsapp_number: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    slack_user_id: Optional[str] = None
+    teams_user_id: Optional[str] = None
     timezone: Optional[str] = "UTC"
     email_notifications_enabled: Optional[bool] = True
     default_task_category: Optional[str] = "General"
@@ -18,6 +21,9 @@ class UserUpdate(BaseModel):
     slack_webhook: Optional[str] = None
     teams_webhook: Optional[str] = None
     whatsapp_number: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    slack_user_id: Optional[str] = None
+    teams_user_id: Optional[str] = None
     timezone: Optional[str] = None
     email_notifications_enabled: Optional[bool] = None
     default_task_category: Optional[str] = None
@@ -96,5 +102,46 @@ class ActivityLogResponse(BaseModel):
     action: str
     description: str
     timestamp: datetime
+    class Config:
+        from_attributes = True
+
+class ExpenseBase(BaseModel):
+    amount: int
+    category: Optional[str] = "Misc"
+    date: Optional[datetime] = None
+    note: Optional[str] = None
+
+class ExpenseCreate(ExpenseBase):
+    pass
+
+class ExpenseResponse(ExpenseBase):
+    id: int
+    user_id: int
+    class Config:
+        from_attributes = True
+
+class SubscriptionBase(BaseModel):
+    name: str
+    renewal_date: datetime
+    recurrence: Optional[RecurrenceType] = RecurrenceType.MONTHLY
+    cost: Optional[int] = None
+
+class SubscriptionCreate(SubscriptionBase):
+    pass
+
+class SubscriptionResponse(SubscriptionBase):
+    id: int
+    user_id: int
+    class Config:
+        from_attributes = True
+
+class NotificationResponse(BaseModel):
+    id: int
+    title: str
+    message: str
+    type: str
+    is_read: bool
+    created_at: datetime
+    user_id: int
     class Config:
         from_attributes = True

@@ -1,193 +1,216 @@
 import re
 from datetime import datetime, timedelta
+import pytz
+import dateparser
+from dateparser.search import search_dates
 from dateutil.relativedelta import relativedelta
-from .. import models
+from app import models
+from app.chat_parser.nlp_utils import normalize_text
 
-def parse_chat_command(text: str):
+def parse_chat_command(text: str, timezone_str: str = "UTC"):
     """
-    Parses a chat command and returns a structured intent.
+    Parses a chat command and returns a structured intent, respecting the user's timezone.
     """
     original_text = text
-    text = text.lower().strip()
+    # Step 1: Normalize text (typo correction and shorthand expansion)
+    text = normalize_text(text)
     
-    # 1. Navigation / Show Intent
-    if any(keyword in text for keyword in ["show today", "today dues", "show dues today", "due today", "list today", "dues today", "what is due today"]):
-        return {"intent": "show_dashboard", "filter": "today"}
+    try:
+        user_tz = pytz.timezone(timezone_str)
+    except Exception:
+        user_tz = pytz.UTC
+        
+    now_local = datetime.now(user_tz)
+    
+    # 0. Greetings & Help
+    if re.search(r"\b(hi|hello|hey|hola|greetings|good morning|good evening)\b", text):
+        if text.strip() in ["hi", "hello", "hey"]:
+            return {"intent": "greet", "is_simple": True}
+        return {"intent": "greet", "is_simple": False}
+
+    if any(kw in text for kw in ["help", "what can you do", "get started", "how to build", "how to use", "commands", "guide"]):
+        return {"intent": "help"}
+
+    if any(kw in text for kw in ["who are you", "what are you", "your name", "introduce yourself"]):
+        return {"intent": "who_are_you"}
+
+    # 1. Navigation / Query
+    query_today_patterns = [
+        "today", "today's update", "today's plan", "today's schedule", 
+        "know about today", "tell me about today", "what's today", 
+        "how's today", "anything today", "status today", "whats up today",
+        "due today", "list today", "show today"
+    ]
+    if any(p in text for p in query_today_patterns):
+        # Additional check to ensure it's not a creation command (e.g., "remind me to... today")
+        if not any(kw in text for kw in ["remind", "add", "create", "buy", "call", "send"]):
+            return {"intent": "show_dashboard", "filter": "today"}
     
     if any(keyword in text for keyword in ["show overdue", "list overdue", "overdue"]):
         return {"intent": "show_dashboard", "filter": "overdue"}
         
-    if any(keyword in text for keyword in ["show upcoming", "upcoming dues", "upcoming"]):
+    if any(keyword in text for keyword in ["show upcoming", "upcoming dues", "upcoming", "tomorrow plan", "what do i have tomorrow"]):
         return {"intent": "show_dashboard", "filter": "upcoming"}
+    
+    if text in ["tasks", "my tasks", "show tasks", "list tasks", "show all tasks", "pending tasks", "reminders", "my reminders", "show reminders"]:
+        return {"intent": "query_reminders"}
 
-    if any(keyword in text for keyword in ["dashboard", "home", "show dashboard"]):
-        return {"intent": "show_dashboard", "filter": "dashboard"}
-    
-    if text in ["settings", "go to settings", "open settings"]:
-        return {"intent": "navigate", "page": "settings"}
-    
-    if text in ["tasks", "my tasks", "show tasks", "list tasks", "show all tasks"]:
-        return {"intent": "navigate", "page": "tasks"}
+    if any(kw in text for kw in ["show expense", "how much did i spend", "expense summary", "spending"]):
+        return {"intent": "query_expenses"}
+
+    # Mark Done
+    # Support: "mark 5 as done", "done reminder 5", "complete #5"
+    id_match = re.search(r"(?:mark\s+)?(?:#|task\s+|reminder\s+)?(\d+)\s+(?:as\s+)?(?:done|complete|finished)", text) or \
+               re.search(r"(?:mark\s+)?(?:done|complete|finished)\s+(?:#|task\s+|reminder\s+)?(\d+)", text)
+    if id_match:
+        # If the first regex matched, the ID is in group 1. If the second, also in group 1 of its match.
+        val = id_match.group(1)
+        return {"intent": "update_reminder", "action": "complete", "id": int(val)}
         
-    # 2. Mark Done
-    mark_done_match = re.search(r"mark done (.+)", text)
-    if mark_done_match or text.startswith("mark done"):
-        return {"intent": "mark_done", "task_query": mark_done_match.group(1) if mark_done_match else None}
+    if any(text.startswith(kw) for kw in ["completed", "finished", "done", "mark as done"]):
+        query = re.sub(r"^(completed|finished|done|mark as done|mark done)\s*", "", text).strip()
+        return {"intent": "update_reminder", "action": "complete", "query": query if query else None}
+
+    # Delete
+    del_match = re.search(r"(?:delete|remove|cancel)\s+(?:#|task\s+)?(\d+)", text)
+    if del_match:
+        return {"intent": "delete_reminder", "id": int(del_match.group(1))}
+    
+    if any(text.startswith(kw) for kw in ["delete", "remove", "cancel"]):
+        query = re.sub(r"^(delete|remove|cancel)\s+", "", text).strip()
+        return {"intent": "delete_reminder", "query": query}
+
+    # 3. Subscription / Renewal
+    if any(kw in text for kw in ["renewal", "subscription", "renew"]):
+        # "netflix renewal 5th every month"
+        dt = dateparser.parse(text, settings={'PREFER_DATES_FROM': 'future', 'RELATIVE_BASE': now_local})
+        name_match = re.search(r"\b(\w+)\s+(?:renewal|subscription|renew)\b", text)
+        name = name_match.group(1).capitalize() if name_match else "Service"
         
-    # 3. Snooze
-    snooze_match = re.search(r"snooze for (\d+) days?", text)
-    if snooze_match:
-        return {"intent": "snooze", "days": int(snooze_match.group(1))}
+        recurrence = models.RecurrenceType.MONTHLY if "every month" in text or "monthly" in text else \
+                     models.RecurrenceType.YEARLY if "every year" in text or "yearly" in text else models.RecurrenceType.NONE
         
-    # 4. Create Task Parsing (Robust Extraction)
-    intent = "create_task"
-    recurrence = models.RecurrenceType.NONE
-    recurrence_interval = 1
-    due_date = None
-    priority = models.PriorityType.MEDIUM
-    category = "General"
-    
-    # Working title that we will strip parts from
-    temp_title = original_text
-    
-    # helper to clean title in-place
-    def strip_from_title(pattern, flags=re.IGNORECASE):
-        nonlocal temp_title
-        temp_title = re.sub(pattern, "", temp_title, flags=flags)
+        return {
+            "intent": "create_subscription",
+            "name": name,
+            "renewal_date": dt if dt else None,
+            "recurrence": recurrence,
+            "cost": amount_match.group(1) if (amount_match := re.search(r"(?:₹|rs\.?\s*)(\d+(?:\.\d{1,2})?)", text)) else None
+        }
 
-    # 5. Extract Priority
-    if re.search(r"\b(urgent|high priority|asap|immediate|critical)\b", text):
-        priority = models.PriorityType.HIGH
-        strip_from_title(r"\b(urgent|high priority|asap|immediate|critical)\b")
-    elif re.search(r"\b(low priority|not urgent|whenever|low)\b", text):
-        priority = models.PriorityType.LOW
-        strip_from_title(r"\b(low priority|not urgent|whenever|low)\b")
+    # 4. Expense Logging
+    # "spent 350 on lunch", "coffee 200", "paid electricity 900"
+    amount_match = re.search(r"(?:₹|rs\.?|)?(\d+(?:\.\d{1,2})?)", text)
+    # Use word boundaries for keywords to avoid accidental matches (e.g. "on" in "done")
+    expense_keywords = [r"\bspent\b", r"\bpaid\b", r"\bcost\b", r"\bfor\b", r"\bon\b", r"\bbuy\b"]
+    is_remind = any(kw in text for kw in ["remind", "reminder", "task"])
+    if amount_match and any(re.search(kw, text) for kw in expense_keywords) and not is_remind:
+        amount = float(amount_match.group(1))
+        # Remove original amount from text to find category/note
+        clean_text = text.replace(amount_match.group(0), "").strip()
+        clean_text = re.sub(r"\b(spent|paid|on|for|buy)\b", "", clean_text).strip()
+        
+        # Try to find a date in the remaining text
+        dt = dateparser.parse(text, settings={'PREFER_DATES_FROM': 'past', 'RELATIVE_BASE': now_local})
+        
+        return {
+            "intent": "create_expense",
+            "amount": amount,
+            "category": clean_text.split()[0].capitalize() if clean_text else "Misc",
+            "note": clean_text.capitalize(),
+            "date": dt if dt else now_local
+        }
 
-    # 6. Extract Category
-    categories = ["Work", "Personal", "Health", "Finance", "Shopping", "Renewal", "General"]
-    cat_mapping = {
-        "Renewal": ["renew", "ssl", "domain", "subscription", "expiry"],
-        "Finance": ["pay", "bill", "invoice", "rent", "tax"],
-        "Work": ["meeting", "call", "project", "audit", "report"],
-        "Health": ["gym", "water", "doctor", "workout"],
-        "Personal": ["mom", "dad", "family", "buy", "gift"],
-        "Shopping": ["milk", "grocery", "order"]
-    }
+    # 5. Follow-ups
+    if "follow up" in text:
+        name_match = re.search(r"follow\s*up\s+(?:with\s+)?(\w+)", text)
+        name = name_match.group(1).capitalize() if name_match else "someone"
+        dt = dateparser.parse(text, settings={'PREFER_DATES_FROM': 'future', 'RELATIVE_BASE': now_local})
+        
+        return {
+            "intent": "create_followup",
+            "title": f"Follow up with {name}",
+            "due_date": dt if dt else (now_local + timedelta(days=1))
+        }
 
-    cat_found = False
-    # Explicit match: category X or [X]
-    cat_match = re.search(r"category\s+(\w+)", text)
-    if cat_match:
-        val = cat_match.group(1).capitalize()
-        if val in categories:
-            category = val
-            cat_found = True
-            strip_from_title(r"category\s+" + re.escape(cat_match.group(1)))
+    # 6. Create Reminder (Default)
+    # Strip action keywords FIRST to avoid dateparser misinterpreting words like "me"
+    temp_title = re.sub(r"^(remind me to|remind me|add|create|task|reminder|need to|know about|tell me about|check|see|show me)\s*", "", text).strip()
     
-    if not cat_found:
-        for cat in categories:
-            pattern = rf"(\[{cat}\]|{cat}:|{cat}\s+-)"
-            if re.search(pattern, original_text, re.IGNORECASE):
-                category = cat
-                cat_found = True
-                strip_from_title(pattern)
-                break
+    # Try precise parse first (better for specific times like 10am)
+    dt = dateparser.parse(temp_title, settings={'PREFER_DATES_FROM': 'future', 'RELATIVE_BASE': now_local.replace(tzinfo=None)})
+    date_phrase = ""
     
-    if not cat_found:
-        # Keyword mapping
-        for cat, keywords in cat_mapping.items():
-            for kw in keywords:
-                if re.search(rf"\b{kw}\b", text):
-                    category = cat
-                    cat_found = True
+    if dt:
+        # If we got a precise date, we need to find what phrase it matched to clean the title
+        # This is tricky with .parse(), so we use search_dates to find the phrase if possible
+        date_results = search_dates(temp_title, settings={'PREFER_DATES_FROM': 'future', 'RELATIVE_BASE': now_local.replace(tzinfo=None)})
+        if date_results:
+            # Find the date_phrase that matches the parsed dt as closely as possible
+            # search_dates returns (phrase, datetime_object)
+            # We iterate to find the phrase that corresponds to our precisely parsed dt
+            for phrase, parsed_dt_from_search in date_results:
+                # Compare year, month, day, hour, minute to see if it's the same date
+                if dt.year == parsed_dt_from_search.year and \
+                   dt.month == parsed_dt_from_search.month and \
+                   dt.day == parsed_dt_from_search.day and \
+                   dt.hour == parsed_dt_from_search.hour and \
+                   dt.minute == parsed_dt_from_search.minute:
+                    date_phrase = phrase
                     break
-            if cat_found: break
-    
-    # 7. Extract Dates/Recurrence
-    now = datetime.utcnow()
-    
-    # Recurrence patterns
-    if "every month" in text:
-        recurrence = models.RecurrenceType.MONTHLY
-        strip_from_title(r"every month")
-        day_match = re.search(r"on the (\d+)(st|nd|rd|th)?", text)
-        if day_match:
-            day = int(day_match.group(1))
-            due_date = now.replace(day=day, hour=10, minute=0, second=0)
-            if due_date < now: due_date += relativedelta(months=1)
-            strip_from_title(r"on the \d+(st|nd|rd|th)?")
-            
-    elif "every year" in text:
-        recurrence = models.RecurrenceType.YEARLY
-        strip_from_title(r"every year")
-        
-    elif "every day" in text or "daily" in text:
-        recurrence = models.RecurrenceType.DAILY
-        strip_from_title(r"every day|daily")
+        # Ensure dt has timezone if it's naive
+        if dt.tzinfo is None:
+            dt = user_tz.localize(dt)
+    else:
+        # Fallback to search_dates
+        date_results = search_dates(temp_title, settings={'PREFER_DATES_FROM': 'future', 'RELATIVE_BASE': now_local.replace(tzinfo=None)})
+        if date_results:
+            date_phrase, dt = date_results[0]
+        # Ensure dt has timezone if it's naive
+        if dt and dt.tzinfo is None: # Added 'dt and' check here
+            dt = user_tz.localize(dt)
 
-    # Absolute Dates (e.g. March 26)
-    months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
-              "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
-    month_pattern = "|".join(months)
-    abs_date_match = re.search(rf"\b({month_pattern})\s+(\d+)(st|nd|rd|th)?", text)
-    if abs_date_match:
-        month_str = abs_date_match.group(1)
-        day = int(abs_date_match.group(2))
-        
-        # Month index (1-based)
-        month_idx = -1
-        for i, m in enumerate(months):
-            if m == month_str:
-                month_idx = (i % 12) + 1
-                break
-        
-        if month_idx != -1:
-            due_date = now.replace(month=month_idx, day=day, hour=10, minute=0, second=0)
-            if due_date < now:
-                due_date = due_date.replace(year=now.year + 1)
-            strip_from_title(abs_date_match.group(0))
-
-    # Relative Dates
-    if not due_date:
-        if "tomorrow" in text:
-            due_date = now + timedelta(days=1)
-            due_date = due_date.replace(hour=9, minute=0)
-            strip_from_title(r"tomorrow")
-        elif "today" in text:
-            due_date = now + timedelta(hours=2)
-            strip_from_title(r"today")
-        elif "next week" in text:
-            due_date = now + timedelta(weeks=1)
-            strip_from_title(r"next week")
-        
-        delta_match = re.search(r"in (\d+) (minute|min|hour|hr|day)s?", text)
-        if delta_match:
-            val = int(delta_match.group(1))
-            unit = delta_match.group(2)
-            if "min" in unit: due_date = now + timedelta(minutes=val)
-            elif "hr" in unit or "hour" in unit: due_date = now + timedelta(hours=val)
-            elif "day" in unit: due_date = now + timedelta(days=val)
-            strip_from_title(r"in \d+ (minute|min|hour|hr|day)s?")
-
-    # 8. Clean Title Final
-    strip_from_title(r"^(remind me to|remind me|add task|create task|task:)", flags=re.IGNORECASE)
+    if date_phrase:
+        # Remove the exact date phrase found
+        temp_title = temp_title.replace(date_phrase, "").strip()
     
-    # Clean extra whitespace
-    clean_title = re.sub(r"\s+", " ", temp_title).strip()
-    if not clean_title or clean_title.lower() == "to":
-        clean_title = "New Task"
+    # Still strip common time keywords just in case
+    time_keywords = ["tomorrow", "tmr", "today", "next", "in", "at", "am", "pm", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "morning", "afternoon", "evening", "night"]
+    for kw in time_keywords:
+        temp_title = re.sub(rf"\b{kw}\b", "", temp_title).strip()
     
-    # Capitalize
-    clean_title = clean_title[0].upper() + clean_title[1:] if clean_title else "New Task"
+    # Strip numbers if it looks like a time/date
+    temp_title = re.sub(r"\b\d+(?:am|pm|st|nd|rd|th)?\b", "", temp_title).strip()
+    temp_title = re.sub(r"\b(at|on|for|by)\b", "", temp_title).strip()
+    temp_title = re.sub(r"\s+", " ", temp_title).strip()
+    
+    # Common fragments that are likely not titles
+    query_fragments = ["to", "for", "at", "about", "todo", "to do", "know about", "knowing about", "tell me about", "what's", "whats", "the"]
+    if not temp_title or temp_title in query_fragments:
+        # If we have a date or time keywords, it might be a query
+        if "today" in text or "today" in normalize_text(original_text): 
+            return {"intent": "show_dashboard", "filter": "today"}
+        if "tomorrow" in text or "tmr" in text: 
+            return {"intent": "show_dashboard", "filter": "upcoming"}
+        if dt: return {"intent": "clarify", "missing": "title", "date": dt}
+        return {"intent": "none"}
+
+    # If we have a title but no date, it's a clarify case or a reminder for "today"
+    if not dt:
+        # If it's short, ask for a date
+        if len(temp_title.split()) < 3:
+            return {"intent": "clarify", "missing": "date", "title": temp_title}
+        # Otherwise default to today/asap
+        dt = now_local
 
     return {
-        "intent": intent,
+        "intent": "create_reminder",
         "data": {
-            "title": clean_title[:100], 
-            "due_date": due_date,
-            "recurrence": recurrence,
-            "recurrence_interval": recurrence_interval,
-            "priority": priority,
-            "category": category
+            "title": temp_title.capitalize(),
+            "due_date": dt,
+            "priority": models.PriorityType.MEDIUM,
+            "category": "General",
+            "recurrence": models.RecurrenceType.MONTHLY if "every month" in text else models.RecurrenceType.NONE,
+            "recurrence_interval": 1
         }
     }

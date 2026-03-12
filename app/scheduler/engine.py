@@ -1,9 +1,9 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 from datetime import datetime
-from ..database import SessionLocal
-from ..models import Task, Reminder, User, ActivityLog
-from ..notifications.dispatcher import dispatch_notification
+from app.database import SessionLocal
+from app.models import Task, Reminder, User, ActivityLog
+from app.notifications.dispatcher import dispatch_notification
 from datetime import timedelta
 
 def generate_reminders():
@@ -26,7 +26,7 @@ def generate_reminders():
             
             if not existing:
                 reminder = Reminder(
-                    message=f"🔔 REMINDER: '{task.title}' is due now!",
+                    message=f"🔔 REMINDER [#{task.id}]: '{task.title}' is due now! Reply 'done' or 'mark done {task.id}' when completed.",
                     scheduled_for=now,
                     is_sent=False,
                     is_followup=False,
@@ -54,7 +54,7 @@ def generate_reminders():
             
             if not existing_followup:
                 followup = Reminder(
-                    message=f"⚠️ FOLLOW-UP: '{task.title}' is still pending. Did you forget?",
+                    message=f"⚠️ FOLLOW-UP [#{task.id}]: '{task.title}' is still pending. Did you forget? Reply 'done {task.id}' to clear.",
                     scheduled_for=now,
                     is_sent=False,
                     is_followup=True,
@@ -82,7 +82,7 @@ def generate_reminders():
             
             if not existing_ensure:
                 ensure = Reminder(
-                    message=f"🚨 ENSURE: '{task.title}' MUST be completed. Please confirm or snooze.",
+                    message=f"🚨 ENSURE [#{task.id}]: '{task.title}' MUST be completed. Please confirm ('done {task.id}') or snooze.",
                     scheduled_for=now,
                     is_sent=False,
                     is_followup=False,
@@ -92,9 +92,33 @@ def generate_reminders():
                 )
                 db.add(ensure)
 
+        # 4. Daily Nags (Every 24 hours after the last reminder if still not done)
+        nag_threshold = now - timedelta(hours=24)
+        overdue_tasks = db.query(Task).filter(
+            Task.is_completed == False,
+            Task.due_date <= nag_threshold
+        ).all()
+        
+        for task in overdue_tasks:
+            latest_reminder = db.query(Reminder).filter(
+                Reminder.task_id == task.id
+            ).order_by(Reminder.scheduled_for.desc()).first()
+            
+            if latest_reminder and latest_reminder.scheduled_for <= nag_threshold:
+                nag = Reminder(
+                    message=f"🚨 OVERDUE NAG [#{task.id}]: '{task.title}' is still pending! Reply 'done {task.id}' to mark it complete.",
+                    scheduled_for=now,
+                    is_sent=False,
+                    is_followup=True,
+                    is_ensure=True,
+                    task_id=task.id,
+                    user_id=task.user_id
+                )
+                db.add(nag)
+
         db.commit()
 
-        # 4. Dispatch all unsent reminders
+        # 5. Dispatch all unsent reminders
         unsent_reminders = db.query(Reminder).filter(Reminder.is_sent == False).all()
         for r in unsent_reminders:
             user = db.query(User).filter(User.id == r.user_id).first()
@@ -131,8 +155,8 @@ def send_daily_summary():
             
             if today_tasks:
                 msg = f"🌅 Good morning! Here are your tasks for today:\n"
-                for i, t in enumerate(today_tasks, 1):
-                    msg += f"{i}. {t.title}\n"
+                for t in today_tasks:
+                    msg += f"• [#{t.id}] {t.title}\n"
                 msg += "\nStay productive! 💪"
                 success = dispatch_notification(user, msg)
                 if success:

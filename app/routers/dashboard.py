@@ -4,8 +4,8 @@ from datetime import datetime, timedelta
 from dateutil import tz
 from typing import Dict, Any, List
 
-from .. import schemas, models, auth
-from ..database import get_db
+from app import schemas, models, auth
+from app.database import get_db
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
@@ -68,10 +68,37 @@ def get_dashboard_summary(
         models.Task.due_date >= now_utc - timedelta(days=1)
     ).all()
     
+    # Upcoming subscriptions (this week)
+    upcoming_subs = db.query(models.Subscription).filter(
+        models.Subscription.user_id == current_user.id,
+        models.Subscription.renewal_date >= today_start_utc,
+        models.Subscription.renewal_date < today_start_utc + timedelta(days=7)
+    ).all()
+    
+    # Generate Briefing (Feature 3)
+    briefing = f"Good morning {current_user.email.split('@')[0]} 👋\n\nToday I’m watching:\n\n"
+    briefing += f"• {len(today_tasks)} reminders due today\n"
+    if len(overdue_tasks) > 0:
+        briefing += f"• {len(overdue_tasks)} overdue reminder{'s' if len(overdue_tasks) > 1 else ''}\n"
+    
+    payments_today = [s for s in upcoming_subs if s.renewal_date < today_end_utc]
+    if payments_today:
+        briefing += f"• {len(payments_today)} upcoming payment{'s' if len(payments_today) > 1 else ''}\n"
+        
+    briefing += "\nComing this week:\n\n"
+    week_events = upcoming_tasks[:2] # Just show first 2
+    for event in week_events:
+        briefing += f"• {event.title}\n"
+    
+    for sub in upcoming_subs:
+        if sub not in payments_today:
+            briefing += f"• {sub.name} renewal\n"
+
     def serialize_tasks(tasks):
         return [schemas.TaskResponse.model_validate(t).model_dump() for t in tasks]
         
     return {
+        "briefing": briefing,
         "overdue": serialize_tasks(overdue_tasks),
         "today": serialize_tasks(today_tasks),
         "upcoming": serialize_tasks(upcoming_tasks),
